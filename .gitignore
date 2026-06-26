@@ -1,0 +1,16 @@
+# Exclude sensitive local configs
+.env
+env.js
+arduino_secrets.h
+
+# Exclude firmware files (C++)
+*.cpp
+
+# Exclude unused/backup frontends
+bruxism_01.html
+dummy_frontend.html
+sample.json
+
+# System/OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BruxSense — Live Monitoring</title>
+
+<!-- Load Configuration -->
+<script src="./env.js"></script>
+
+<!-- Firebase SDK -->
+<script type="module">
+import { initializeApp }
+  from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+import { getDatabase, ref, onValue, set, get }
+  from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+import { getAuth, signInWithEmailAndPassword }
+  from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+import {
+  getFirestore, collection, query, where,
+  orderBy, getDocs, doc, getDoc, limit, setDoc, serverTimestamp
+} from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+const env = window.ENV || {};
+const firebaseConfig = {
+  apiKey:            env.FIREBASE_API_KEY || "",
+  authDomain:        env.FIREBASE_AUTH_DOMAIN || "",
+  databaseURL:       env.FIREBASE_DATABASE_URL || "",
+  projectId:         env.FIREBASE_PROJECT_ID || "",
+  storageBucket:     env.FIREBASE_STORAGE_BUCKET || "",
+  messagingSenderId: env.FIREBASE_MESSAGING_SENDER_ID || "",
+  appId:             env.FIREBASE_APP_ID || ""
+};
+
+const app    = initializeApp(firebaseConfig);
+const db     = getDatabase(app);
+const auth   = getAuth(app);
+const fsdb   = getFirestore(app);
+
+const EMAIL    = env.FIREBASE_EMAIL || "";
+const PASSWORD = env.FIREBASE_PASSWORD || "";
+const USER_ID  = env.FIREBASE_USER_ID || "";
+
+signInWithEmailAndPassword(auth, EMAIL, PASSWORD)
+  .then(cred => {
+    console.log("Signed in:", cred.user.uid);
+
+    // ── RTDB calibration listener ────────────────────────
+    const calibRef = ref(db, `bruxsense/sessions/${USER_ID}/current_session/calibration`);
+    onValue(calibRef, snap => {
+      const data = snap.val();
+      if (!data) return;
+      if (window.updateCalibrationFromFirebase) window.updateCalibrationFromFirebase(data);
+    });
+
+    // ── RTDB live listener ──────────────────────────────
+    const liveRef = ref(db, `bruxsense/sessions/${USER_ID}/current_session/live_data`);
+    onValue(liveRef, snap => {
+      const data = snap.val();
+      if (!data) return;
+      if (window.updateDashboardFromFirebase) window.updateDashboardFromFirebase(data);
+    });
+
+    // ── Expose Firestore helpers & Calibration hooks ────
+    window._fsdb    = fsdb;
+    window._USER_ID = USER_ID;
+    window._fsAPI   = { collection, query, where, orderBy, getDocs, doc, getDoc, limit, setDoc, serverTimestamp };
+    window._rtdb    = db;
+    window._rtdbAPI = { ref, onValue, set, get };
+    
+    window.startCalibrationInFirebase = function() {
+      const statusRef = ref(db, `bruxsense/sessions/${USER_ID}/current_session/calibration/status`);
+      set(statusRef, "start");
+    };
+
+    window.updatePatientInRTDB = function(patientId, username) {
+      const idRef = ref(db, `bruxsense/sessions/${USER_ID}/current_session/metadata/patient_id`);
+      const nameRef = ref(db, `bruxsense/sessions/${USER_ID}/current_session/metadata/patient_name`);
+      return Promise.all([
+        set(idRef, patientId),
+        set(nameRef, username)
+      ]);
+    };
+
+    if (window.onFirebaseReady) window.onFirebaseReady();
+  })
+  .catch(err => console.error("Login failed:", err.code, err.message));
+</script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div class="app">
+
+<!-- LOGIN OVERLAY -->
+<div class="login-overlay" id="loginOverlay">
+  <div class="login-card">
+    <div class="login-logo">Brux<span>Sense</span></div>
+    <div class="login-tagline">Clinical Trial Portal</div>
+    
+    <div class="input-group">
+      <label for="usernameInput">Patient Name</label>
+      <input type="text" id="usernameInput" placeholder="Enter patient name..." required>
+    </div>
+    
+    <div class="input-group">
+      <label for="emailInput">Email Address</label>
+      <input type="email" id="emailInput" placeholder="Enter email address..." required>
+    </div>
+    
+    <button class="login-btn" id="loginBtn" onclick="handlePatientLogin()">Save & Proceed</button>
+  </div>
+</div>
+
+<!-- CALIBRATION OVERLAY -->
+<div class="calibration-overlay" id="calibrationOverlay">
+  <div class="calibration-card">
+    <div class="calib-title">Brux<span>Sense</span></div>
+    <div class="calib-desc">System Calibration Wizard</div>
+
+    <!-- Stepper Steps -->
+    <div class="calib-steps">
+      <div class="step-item" id="stepRelax">
+        <div class="step-node">1</div>
+        <div class="step-label">Relax</div>
+      </div>
+      <div class="step-item" id="stepClench">
+        <div class="step-node">2</div>
+        <div class="step-label">Clench</div>
+      </div>
+      <div class="step-item" id="stepGrind">
+        <div class="step-node">3</div>
+        <div class="step-label">Grind</div>
+      </div>
+    </div>
+
+    <!-- Timer SVG Circle -->
+    <div class="calib-timer-wrap">
+      <svg class="timer-svg" viewBox="0 0 130 130">
+        <circle class="timer-bg" cx="65" cy="65" r="60"></circle>
+        <circle class="timer-progress" id="timerProgress" cx="65" cy="65" r="60"></circle>
+      </svg>
+      <div class="timer-value" id="timerVal">—</div>
+    </div>
+
+    <!-- Dynamic Instruction -->
+    <div class="instruction-box" id="instructionBox">
+      Establishing secure database connection to BruxSense hardware patch...
+    </div>
+
+    <!-- Action button -->
+    <button class="start-calib-btn" id="startCalibBtn" onclick="startCalibration()">Start Calibration</button>
+  </div>
+</div>
+
+<!-- DURATION OVERLAY -->
+<div class="duration-overlay" id="durationOverlay" style="display: none; opacity: 0;">
+  <div class="duration-card">
+    <div class="duration-title">Brux<span>Sense</span></div>
+    <div class="duration-desc">Configure Monitoring Session Duration</div>
+    
+    <div class="duration-presets">
+      <button class="preset-btn" onclick="selectPreset(120, this)">2 Min (Demo)</button>
+      <button class="preset-btn" onclick="selectPreset(3600, this)">1 Hour</button>
+      <button class="preset-btn" onclick="selectPreset(14400, this)">4 Hours</button>
+      <button class="preset-btn" onclick="selectPreset(28800, this)">8 Hours</button>
+    </div>
+    
+    <div class="custom-duration-group">
+      <label style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary);">Or Custom Duration</label>
+      <div class="custom-duration-inputs">
+        <input type="number" id="customMinInput" placeholder="Minutes" min="1" oninput="clearPresets()">
+        <input type="number" id="customHrInput" placeholder="Hours" min="1" oninput="clearPresets()">
+      </div>
+    </div>
+    
+    <button class="login-btn" id="startSessionBtn" onclick="startMonitoringSession()" style="margin-top: 10px;">Start Session</button>
+  </div>
+</div>
+
+<!-- HEADER -->
+<header>
+  <div class="logo">
+    <div class="logo-icon"></div>
+    <span class="logo-text">Brux<span>Sense</span></span>
+  </div>
+  <div class="header-right">
+    <div class="session-info" id="sessionInfo">Status: Connecting...</div>
+    <div class="live-badge" id="liveBadge">
+      <div class="live-dot"></div>WAITING FOR DATA
+    </div>
+  </div>
+</header>
+
+<!-- NAV TABS -->
+<div class="nav-tabs">
+  <button class="tab-btn active" onclick="switchTab('live',this)">⬤ LIVE MONITOR</button>
+  <button class="tab-btn" onclick="switchTab('history',this)">☰ SESSION HISTORY</button>
+</div>
+
+<!-- SESSION ACTIVE TIMER BAR -->
+<div class="active-timer-bar" id="activeTimerBar">
+  <span class="timer-left-label">SESSION MONITORING IN PROGRESS</span>
+  <div class="timer-value-display">
+    <span id="sessionTimerDisplay">--:--:--</span>
+    <button class="stop-session-btn" onclick="stopMonitoringSession()">Stop Session</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════
+     LIVE TAB
+══════════════════════════════════════════ -->
+<div class="tab-panel active" id="tab-live">
+
+  <div class="alert-banner" id="alertBanner">⚠️ BRUXISM EVENT DETECTED ⚠️</div>
+
+  <div class="kpi-row">
+    <div class="kpi-card">
+      <div class="kpi-label">Live EMG RMS
+        <div class="pulse-icon" style="background:var(--accent-emg)" id="pulseEmg"></div>
+      </div>
+      <div class="kpi-value" id="kpiEmg" style="color:var(--text-primary)">0.000</div>
+      <div class="kpi-sub">Volts</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Live Heart Rate
+        <div class="pulse-icon" style="background:var(--accent-hr)" id="pulseHr"></div>
+      </div>
+      <div class="kpi-value" id="kpiHr" style="color:var(--text-primary)">--</div>
+      <div class="kpi-sub">BPM</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Grinding Score
+        <div class="pulse-icon" style="background:var(--accent-motion)" id="pulseGrind"></div>
+      </div>
+      <div class="kpi-value" id="kpiGrind" style="color:var(--text-primary)">0</div>
+      <div class="kpi-sub">Scale 0–60</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Total Events</div>
+      <div class="kpi-value" id="kpiEvents" style="color:var(--accent-warn)">0</div>
+      <div class="kpi-sub">This Session</div>
+    </div>
+  </div>
+
+  <div class="main-live">
+    <div class="charts-area">
+      <div class="chart-container">
+        <div class="chart-header">
+          <span class="chart-title emg">Live EMG RMS (15 Min Window)</span>
+        </div>
+        <div class="chart-wrap"><canvas id="emgChart"></canvas></div>
+      </div>
+      <div class="chart-container">
+        <div class="chart-header">
+          <span class="chart-title hr">Live Heart Rate (BPM)</span>
+        </div>
+        <div class="chart-wrap"><canvas id="hrChart"></canvas></div>
+      </div>
+      <div class="chart-container">
+        <div class="chart-header">
+          <span class="chart-title motion">Live Grinding Score</span>
+        </div>
+        <div class="chart-wrap"><canvas id="motionChart"></canvas></div>
+      </div>
+    </div>
+    <div class="sidebar-live">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Real-Time Event Log</div>
+        <div class="event-list" id="eventLog">
+          <div class="empty-log">No events detected yet...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════
+     HISTORY TAB
+══════════════════════════════════════════ -->
+<div class="tab-panel" id="tab-history">
+  <div class="history-layout">
+
+    <!-- Session list -->
+    <div class="session-list-panel">
+      <div class="session-list-header">
+        Past Sessions
+        <button class="refresh-btn" onclick="loadSessionList()">↻ Refresh</button>
+      </div>
+      <div id="sessionList"><div class="loading-sessions">Loading...</div></div>
+    </div>
+
+    <!-- Session detail -->
+    <div class="session-detail-panel" id="sessionDetailPanel">
+      <div class="detail-placeholder" id="detailPlaceholder">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="1.5">
+          <path d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2
+            a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0
+            002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0
+            01-2 2h-2a2 2 0 01-2-2z"/>
+        </svg>
+        <span style="font-size:15px">Select a session to view details</span>
+      </div>
+      <div class="detail-content" id="detailContent"></div>
+    </div>
+  </div>
+</div>
+
+</div><!-- .app -->
+
+<script>
+// ═══════════════════════════════════════════════════════
+// TAB SWITCHING
+// ═══════════════════════════════════════════════════════
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+  if (name === 'history' && !window._historyLoaded) {
+    window._historyLoaded = true;
+    if (window._fsdb) loadSessionList();
+    else window._pendingHistory = true;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// FIREBASE READY CALLBACK
+// ═══════════════════════════════════════════════════════
+window.onFirebaseReady = function() {
+  if (window._pendingHistory) loadSessionList();
+};
+</script>
+
+<!-- Modular Dashboard Scripts -->
+<script src="./login.js"></script>
+<script src="./calibration.js"></script>
+<script src="./dashboard.js"></script>
+<script src="./history.js"></script>
+<script src="./report.js"></script>
+</body>
+</html>

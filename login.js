@@ -62,6 +62,11 @@
       window._PATIENT_ID = patientId;
       window._PATIENT_USERNAME = username;
       
+      if (username.toLowerCase().includes('test')) {
+        window._isSimulatedTestMode = true;
+        console.log("[Test Mode] Automatically enabling simulated test mode based on patient name.");
+      }
+      
       // 3. Fade out overlay and unlock the calibration screen
       loginOverlay.style.opacity = '0';
       setTimeout(() => {

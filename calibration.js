@@ -109,4 +109,47 @@
       }
     });
   }
+
+  window.bypassCalibration = function() {
+    console.log("[Test Mode] Bypassing calibration wizard...");
+    
+    // Set simulated test mode flag
+    window._isSimulatedTestMode = true;
+    
+    // Write baseline calibration to RTDB so metadata is present
+    if (window._rtdb && window._USER_ID) {
+      const rtdb = window._rtdb;
+      const { ref, set } = window._rtdbAPI;
+      const USER_ID = window._USER_ID;
+      
+      set(ref(rtdb, `bruxsense/sessions/${USER_ID}/current_session/calibration`), {
+        status: "complete",
+        emg_baseline: 0.05,
+        emg_peak: 0.80,
+        emg_threshold: 0.25,
+        mag_noise_floor: 1.0,
+        mag_active_grind: 10.0,
+        progress: 100,
+        timer: 0
+      }).catch(err => console.warn("[Test Mode] Bypassing calibration failed to write to RTDB:", err));
+    }
+    
+    // Hide calibration overlay and trigger duration setup overlay transition
+    const calibrationOverlay = document.getElementById('calibrationOverlay');
+    if (calibrationOverlay) {
+      calibrationOverlay.style.opacity = '0';
+      setTimeout(() => {
+        calibrationOverlay.style.display = 'none';
+        
+        const durationOverlay = document.getElementById('durationOverlay');
+        if (durationOverlay) {
+          durationOverlay.style.display = 'flex';
+          setTimeout(() => {
+            durationOverlay.style.opacity = '1';
+          }, 50);
+        }
+      }, 500);
+    }
+  };
 })();
+

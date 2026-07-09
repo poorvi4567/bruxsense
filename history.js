@@ -82,8 +82,7 @@
       try {
         const q2 = query(
           collection(fsdb, 'sessions'),
-          where('userId', '==', window._USER_ID),
-          limit(30)
+          where('userId', '==', window._USER_ID)
         );
         snap = await getDocs(q2);
       } catch (err2) {
@@ -210,7 +209,7 @@
       return '';
     });
     const emgVals  = readings.map(r => parseFloat(r.emg_val)  || 0);
-    const hrVals   = readings.map(r => parseFloat(r.hr_bpm)   || null);
+    const hrVals   = readings.map(r => parseFloat(r.hr_bpm || r.heart_rate) || null);
     const emgColors = readings.map(r =>
       parseInt(r.event_duration_ms) > 0 ? 'rgba(255,51,51,0.85)' : 'rgba(0,212,170,0.5)');
 
@@ -243,10 +242,6 @@
             ${s.device_id || 'bruxpatch_v1'} &nbsp;·&nbsp;
             <span style="color:${gradeColor};font-weight:600">${gradeLabel}</span>
           </div>
-        </div>
-        <div style="display: flex; gap: 10px;">
-          <button class="export-btn" onclick="exportCSV('${sessionId}')">↓ Export CSV</button>
-          <button class="export-btn" onclick="exportPDF()">↓ Download PDF</button>
         </div>
       </div>
 
@@ -319,7 +314,7 @@
               data: hrVals, borderColor: '#ff6b6b',
               backgroundColor: 'rgba(255,107,107,0.1)',
               borderWidth: 1.5, fill: true, tension: 0.4,
-              pointRadius: 0, spanGaps: true
+              pointRadius: 3, pointHitRadius: 10, spanGaps: true
             }]
           },
           options: {
@@ -340,6 +335,25 @@
     window._currentEvents   = events;
     window._currentSummary  = s;
     window._currentSessionId = sessionId;
+
+    // Show header action buttons and wire to this selected past session
+    const btnPdf = document.getElementById('downloadReportBtn');
+    if (btnPdf) {
+      btnPdf.style.display = 'inline-flex';
+      btnPdf.onclick = () => {
+        if (window.generateDetailedClinicalPDF) {
+          window.generateDetailedClinicalPDF(s, readings, events);
+        }
+      };
+    }
+
+    const btnCsv = document.getElementById('exportCSVBtn');
+    if (btnCsv) {
+      btnCsv.style.display = 'inline-flex';
+      btnCsv.onclick = () => {
+        window.exportCSV(sessionId);
+      };
+    }
   }
 
   // Expose CSV export to global scope
@@ -347,13 +361,19 @@
     const readings = window._currentReadings || [];
     if (readings.length === 0) { alert('No readings data to export.'); return; }
 
-    const headers = 'timestamp,emg_val,emg_peak,hr_bpm,mag_x,mag_y,mag_z,event_duration_ms\n';
+    const headers = 'timestamp,emg_val,emg_peak,heart_rate,grinding_score,event_duration_ms\n';
     const rows = readings.map(r => {
       const tsIso = (r.timestamp && typeof r.timestamp.toDate === 'function')
-        ? r.timestamp.toDate().toISOString() : '';
+        ? r.timestamp.toDate().toISOString()
+        : (r.timestamp_epoch ? new Date(r.timestamp_epoch * 1000).toISOString() : '');
+      const hr = r.hr_bpm || r.heart_rate || 0;
+      const grind = r.grinding_score !== undefined ? r.grinding_score : (
+        r.grind_score !== undefined ? r.grind_score : Math.round(Math.sqrt((r.mag_x||0)**2 + (r.mag_y||0)**2 + (r.mag_z||0)**2))
+      );
+      const emgVal = r.emg_val !== undefined ? r.emg_val : (r.emg_rms || 0);
+
       return [
-        tsIso, r.emg_val || 0, r.emg_peak || 0, r.hr_bpm || 0,
-        r.mag_x || 0, r.mag_y || 0, r.mag_z || 0, r.event_duration_ms || 0
+        tsIso, emgVal, r.emg_peak || 0, hr, grind, r.event_duration_ms || 0
       ].join(',');
     }).join('\n');
 
@@ -373,6 +393,14 @@
     const events = window._currentEvents || [];
 
     if (!s) { alert('No session summary data to export.'); return; }
+
+    // Route to premium detailed PDF report generator if loaded
+    if (window.generateDetailedClinicalPDF) {
+      window.generateDetailedClinicalPDF(s, readings, events);
+      return;
+    }
+
+    console.warn("[Report] Detailed clinical report generator not loaded. Falling back to basic layout.");
 
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({
@@ -468,7 +496,7 @@
     const statsObj = s.statistics || {};
     const avgHr = statsObj.avg_hr_bpm || 0;
     const maxEmgRecord = statsObj.max_emg_v || 0;
-
+    
     const summaries = [
       { label: "TOTAL EVENTS", val: totalEvents, color: [255, 170, 0] }, // Warn orange
       { label: "SEVERITY", val: severity.toUpperCase(), color: severity === 'Severe' ? [255, 51, 51] : [0, 212, 170] },

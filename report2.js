@@ -314,12 +314,33 @@
 
     let readings = [], events = [];
     try {
+      console.log(`[Data Trace] 1. Initiating getFresh for readings path: bruxsense/sessions/${USER_ID}/readings`);
       const rs = await getFresh(`bruxsense/sessions/${USER_ID}/readings`);
-      if (rs.exists()) rs.forEach(s => readings.push(s.val()));
-      const es = await getFresh(`bruxsense/sessions/${USER_ID}/events`);
-      if (es.exists()) es.forEach(s => events.push(s.val()));
+      console.log(`[Data Trace] 2. getFresh resolved for readings. rs.exists():`, rs.exists());
+      
+      if (rs.exists()) {
+        const rawReadings = rs.val();
+        console.log(`[Data Trace] 3. Raw readings object from RTDB:`, JSON.stringify(rawReadings));
+        rs.forEach(s => { readings.push(s.val()); });
+        console.log(`[Data Trace] 4. Processed readings array length:`, readings.length);
+      } else {
+        console.warn(`[Data Trace] 3. Readings node does NOT exist in RTDB!`);
+      }
 
-      console.log(`[Report] Fetched from RTDB: ${readings.length} readings, ${events.length} events`);
+      console.log(`[Data Trace] 5. Initiating getFresh for events path: bruxsense/sessions/${USER_ID}/events`);
+      const es = await getFresh(`bruxsense/sessions/${USER_ID}/events`);
+      console.log(`[Data Trace] 6. getFresh resolved for events. es.exists():`, es.exists());
+      
+      if (es.exists()) {
+        const rawEvents = es.val();
+        console.log(`[Data Trace] 7. Raw events object from RTDB:`, JSON.stringify(rawEvents));
+        es.forEach(s => { events.push(s.val()); });
+        console.log(`[Data Trace] 8. Processed events array length:`, events.length);
+      } else {
+        console.warn(`[Data Trace] 7. Events node does NOT exist in RTDB!`);
+      }
+
+      console.log(`[Data Trace] 9. Final counts before PDF/Firestore: ${readings.length} readings, ${events.length} events`);
 
       // Fetch calibration node from RTDB so metadata has actual calibrated values
       const cs = await getFresh(`bruxsense/sessions/${USER_ID}/current_session/calibration`);

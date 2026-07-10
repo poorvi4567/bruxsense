@@ -58,13 +58,31 @@
         console.log(`[Login] Realtime Database updated with patient ID: ${patientId}`);
       }
       
+      // 3. Reset calibration node in RTDB so stale 'complete' status
+      //    from a previous session doesn't auto-skip calibration for a new user
+      if (window._rtdb && window._USER_ID && window._rtdbAPI) {
+        const { ref, set } = window._rtdbAPI;
+        await set(ref(window._rtdb, `bruxsense/sessions/${window._USER_ID}/current_session/calibration`), null);
+        console.log("[Login] Calibration node reset — wizard will require fresh calibration.");
+      }
+      
       // Save info locally in session window context
       window._PATIENT_ID = patientId;
       window._PATIENT_USERNAME = username;
       
-      if (username.toLowerCase().includes('test')) {
+      // Test mode requires BOTH: username contains "test" AND email is "test@example.com"
+      const isTestUser = username.toLowerCase().includes('test') && email.toLowerCase() === 'test@example.com';
+      if (isTestUser) {
         window._isSimulatedTestMode = true;
-        console.log("[Test Mode] Automatically enabling simulated test mode based on patient name.");
+        console.log("[Test Mode] Automatically enabling simulated test mode (name contains 'test' + test email).");
+      } else {
+        window._isSimulatedTestMode = false;
+      }
+      
+      // Show/hide bypass calibration button based on test mode
+      const bypassBtn = document.getElementById('bypassCalibBtn');
+      if (bypassBtn) {
+        bypassBtn.style.display = isTestUser ? 'block' : 'none';
       }
       
       // 3. Fade out overlay and unlock the calibration screen
@@ -76,6 +94,18 @@
     } catch (err) {
       console.error("[Login] Save failed:", err);
       alert("Error saving patient context: " + err.message);
+      loginBtn.disabled = false;
+      loginBtn.style.opacity = '1';
+      loginBtn.textContent = 'Save & Proceed';
+    }
+  };
+
+  // Enable the login button only after Firebase has successfully connected
+  const oldReady = window.onFirebaseReady;
+  window.onFirebaseReady = function() {
+    if (oldReady) oldReady();
+    const loginBtn = document.getElementById('loginBtn');
+    if (loginBtn) {
       loginBtn.disabled = false;
       loginBtn.style.opacity = '1';
       loginBtn.textContent = 'Save & Proceed';

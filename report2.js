@@ -28,6 +28,14 @@
     startBtn.disabled = true;
     startBtn.textContent = 'Starting...';
 
+    // Guard: prevent starting a new session while previous report is being saved
+    if (window._reportGenerating) {
+      alert('Previous session data is still being saved. Please wait a moment.');
+      startBtn.disabled = false;
+      startBtn.textContent = 'Start Session';
+      return;
+    }
+
     if (selectedDurationSec <= 0) {
       alert('Please select a preset or enter a custom session duration.');
       startBtn.disabled = false;
@@ -103,12 +111,17 @@
 
     const metadataRef = ref(rtdb, `bruxsense/sessions/${USER_ID}/current_session/metadata`);
     onValue(metadataRef, (snapshot) => {
+      // Guard: ignore status updates if no patient is logged in yet
+      if (!window._PATIENT_ID) return;
+
       const data = snapshot.val();
       if (!data) return;
 
       const status = data.status || 'waiting_duration';
       const startEpoch = data.session_start_epoch || 0;
       const endEpoch = data.session_end_epoch || 0;
+
+      console.log(`[Status Listener] Triggered. Status: ${status}, startEpoch: ${startEpoch}, endEpoch: ${endEpoch}, now: ${Math.floor(Date.now() / 1000)}`);
 
       const infoEl = document.getElementById('sessionInfo');
       if (infoEl) {
@@ -177,10 +190,16 @@
     const timerBar = document.getElementById('activeTimerBar');
     const totalDuration = endEpoch - startEpoch;
 
+    console.log(`[Countdown] Initialized with startEpoch: ${startEpoch}, endEpoch: ${endEpoch}, totalDuration: ${totalDuration}`);
+
     function update() {
       const nowEpoch = Math.floor(Date.now() / 1000);
       const timeLeft = endEpoch - nowEpoch;
+      
+      console.log(`[Countdown Tick] timeLeft: ${timeLeft}, nowEpoch: ${nowEpoch}, endEpoch: ${endEpoch}`);
+
       if (timeLeft <= 0) {
+        console.log(`[Countdown] Time is up or invalid. timeLeft: ${timeLeft}. Stopping session.`);
         if (timerDisplay) timerDisplay.textContent = '00:00:00';
         if (timerBar) timerBar.style.setProperty('--timer-width', '0%');
         clearInterval(countdownInterval);
@@ -290,6 +309,8 @@
       const es = await get(ref(rtdb, `bruxsense/sessions/${USER_ID}/events`));
       if (es.exists()) es.forEach(s => events.push(s.val()));
 
+      console.log(`[Report] Fetched from RTDB: ${readings.length} readings, ${events.length} events`);
+
       // Fetch calibration node from RTDB so metadata has actual calibrated values
       const cs = await get(ref(rtdb, `bruxsense/sessions/${USER_ID}/current_session/calibration`));
       if (cs.exists()) {
@@ -310,8 +331,8 @@
       };
     }
 
-    // ── Mock data generator for testing offline ───────────
-    if (readings.length === 0) {
+    // ── Mock data generator — ONLY in test/simulated mode ───────────
+    if (readings.length === 0 && window._isSimulatedTestMode) {
       console.log('[Test Mode] No readings found. Generating mock data for report testing...');
       const startEpoch = metaData.session_start_epoch || (Math.floor(Date.now() / 1000) - 120);
       const endEpoch = metaData.session_end_epoch || Math.floor(Date.now() / 1000);
@@ -372,6 +393,8 @@
           event_duration_ms: 1500
         });
       }
+    } else if (readings.length === 0) {
+      console.log('[Report] No readings found and not in test mode — saving empty session.');
     }
 
     // Save to Firestore
@@ -417,27 +440,53 @@
           },
           statistics: { max_emg_v: maxEmg, avg_hr_bpm: avgHr, phasic_events: phasicCount, tonic_events: tonicCount, grinding_episodes: grindingCount }
         });
-        for (const r of readings) {
-          const rRef = doc(collection(fsdb, 'sessions', sessionRef.id, 'readings'));
-          const rDate = r.timestamp_epoch ? new Date(r.timestamp_epoch * 1000) : new Date();
-          await setDoc(rRef, {
-            timestamp: rDate, timestamp_epoch: r.timestamp_epoch || 0,
-            emg_val: r.emg_rms || 0, emg_peak: r.emg_peak || 0, hr_bpm: r.hr_bpm || 0,
-            grinding_score: r.grinding_score !== undefined ? r.grinding_score : (
-              r.grind_score !== undefined ? r.grind_score : Math.round(Math.sqrt((r.mag_x||0)**2 + (r.mag_y||0)**2 + (r.mag_z||0)**2))
-            ),
-            mag_x: r.mag_x || 0, mag_y: r.mag_y || 0, mag_z: r.mag_z || 0, event_duration_ms: r.event_duration_ms || 0
+        // Write readings in parallel batches (resilient to individual failures)
+        console.log(`[Report] Saving ${readings.length} readings to Firestore...`);
+        const BATCH_SIZE = 10;
+        let readingsSaved = 0, readingsFailed = 0;
+        for (let i = 0; i < readings.length; i += BATCH_SIZE) {
+          const batch = readings.slice(i, i + BATCH_SIZE);
+          const promises = batch.map(r => {
+            const rRef = doc(collection(fsdb, 'sessions', sessionRef.id, 'readings'));
+            const rDate = r.timestamp_epoch ? new Date(r.timestamp_epoch * 1000) : new Date();
+            return setDoc(rRef, {
+              timestamp: rDate, timestamp_epoch: r.timestamp_epoch || 0,
+              emg_val: r.emg_rms || 0, emg_peak: r.emg_peak || 0, hr_bpm: r.hr_bpm || 0,
+              grinding_score: r.grinding_score !== undefined ? r.grinding_score : (
+                r.grind_score !== undefined ? r.grind_score : Math.round(Math.sqrt((r.mag_x||0)**2 + (r.mag_y||0)**2 + (r.mag_z||0)**2))
+              ),
+              mag_x: r.mag_x || 0, mag_y: r.mag_y || 0, mag_z: r.mag_z || 0, event_duration_ms: r.event_duration_ms || 0
+            });
+          });
+          const results = await Promise.allSettled(promises);
+          results.forEach((res, idx) => {
+            if (res.status === 'fulfilled') { readingsSaved++; }
+            else { readingsFailed++; console.error(`[Report] Reading ${i + idx} write failed:`, res.reason); }
           });
         }
-        for (const e of events) {
-          const eRef = doc(collection(fsdb, 'sessions', sessionRef.id, 'events'));
-          const eDate = e.timestamp_epoch ? new Date(e.timestamp_epoch * 1000) : new Date();
-          await setDoc(eRef, {
-            start_time: eDate, end_time: new Date(eDate.getTime() + (e.duration_ms || 0)),
-            timestamp_epoch: e.timestamp_epoch || 0, duration_ms: e.duration_ms || 0,
-            peak_rms: e.peak_rms || 0, hr_at_event: e.hr_at_event || 0, type: e.type || 'clench'
+        console.log(`[Report] Readings: ${readingsSaved} saved, ${readingsFailed} failed out of ${readings.length}`);
+
+        // Write events in parallel batches
+        console.log(`[Report] Saving ${events.length} events to Firestore...`);
+        let eventsSaved = 0, eventsFailed = 0;
+        for (let i = 0; i < events.length; i += BATCH_SIZE) {
+          const batch = events.slice(i, i + BATCH_SIZE);
+          const promises = batch.map(e => {
+            const eRef = doc(collection(fsdb, 'sessions', sessionRef.id, 'events'));
+            const eDate = e.timestamp_epoch ? new Date(e.timestamp_epoch * 1000) : new Date();
+            return setDoc(eRef, {
+              start_time: eDate, end_time: new Date(eDate.getTime() + (e.duration_ms || 0)),
+              timestamp_epoch: e.timestamp_epoch || 0, duration_ms: e.duration_ms || 0,
+              peak_rms: e.peak_rms || 0, hr_at_event: e.hr_at_event || 0, type: e.type || 'clench'
+            });
+          });
+          const results = await Promise.allSettled(promises);
+          results.forEach((res, idx) => {
+            if (res.status === 'fulfilled') { eventsSaved++; }
+            else { eventsFailed++; console.error(`[Report] Event ${i + idx} write failed:`, res.reason); }
           });
         }
+        console.log(`[Report] Events: ${eventsSaved} saved, ${eventsFailed} failed out of ${events.length}`);
         console.log('[Report] Firestore write complete');
       }
     } catch (fsErr) {

@@ -111,10 +111,13 @@
   }
 
   window.bypassCalibration = function() {
+    // Safety: refuse bypass unless login confirmed test mode
+    if (!window._isSimulatedTestMode) {
+      console.warn("[Calibration] Bypass denied — not in test mode.");
+      alert("Calibration bypass is only available in Test Mode.\nUse a patient name containing 'test' and email 'test@example.com'.");
+      return;
+    }
     console.log("[Test Mode] Bypassing calibration wizard...");
-    
-    // Set simulated test mode flag
-    window._isSimulatedTestMode = true;
     
     // Write baseline calibration to RTDB so metadata is present
     if (window._rtdb && window._USER_ID) {

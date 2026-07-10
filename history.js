@@ -186,6 +186,7 @@
         );
         const esnap2 = await getDocs(eq2);
         esnap2.forEach(d => events.push(d.data()));
+        events.sort((a, b) => (a.timestamp_epoch || 0) - (b.timestamp_epoch || 0));
       } catch (e2) { console.warn('Could not load events:', e2.message); }
     }
 

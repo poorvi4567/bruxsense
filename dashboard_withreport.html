@@ -75,9 +75,16 @@
                 };
 
                 window.updatePatientInRTDB = function (patientId, username) {
-                    const idRef = ref(db, `bruxsense/sessions/${USER_ID}/current_session/metadata/patient_id`);
-                    const nameRef = ref(db, `bruxsense/sessions/${USER_ID}/current_session/metadata/patient_name`);
-                    return Promise.all([set(idRef, patientId), set(nameRef, username)]);
+                    const metaRef = ref(db, `bruxsense/sessions/${USER_ID}/current_session/metadata`);
+                    return set(metaRef, {
+                        patient_id: patientId,
+                        patient_name: username,
+                        device_id: 'bruxpatch_v1',
+                        status: 'waiting_duration',
+                        session_duration_sec: 0,
+                        session_start_epoch: 0,
+                        session_end_epoch: 0
+                    });
                 };
 
                 if (window.onFirebaseReady) window.onFirebaseReady();
@@ -149,17 +156,17 @@
 
                 <div class="input-group">
                     <label for="usernameInput">Patient Name</label>
-                    <input type="text" id="usernameInput" placeholder="Enter patient name..." value="Test Patient"
+                    <input type="text" id="usernameInput" placeholder="Enter patient name..."
                         required>
                 </div>
 
                 <div class="input-group">
                     <label for="emailInput">Email Address</label>
-                    <input type="email" id="emailInput" placeholder="Enter email address..." value="test@example.com"
+                    <input type="email" id="emailInput" placeholder="Enter email address..."
                         required>
                 </div>
 
-                <button class="login-btn" id="loginBtn" onclick="handlePatientLogin()">Save & Proceed</button>
+                <button class="login-btn" id="loginBtn" onclick="handlePatientLogin()" disabled style="opacity: 0.6;">Connecting to Database...</button>
             </div>
         </div>
 
@@ -199,7 +206,7 @@
                 <button class="start-calib-btn" id="startCalibBtn" onclick="startCalibration()">Start
                     Calibration</button>
                 <button class="start-calib-btn" id="bypassCalibBtn" onclick="bypassCalibration()"
-                    style="margin-top: 10px; background: transparent; border: 1px solid var(--text-secondary); color: var(--text-secondary);">Bypass
+                    style="display: none; margin-top: 10px; background: transparent; border: 1px solid var(--text-secondary); color: var(--text-secondary);">Bypass
                     Calibration (Test Mode)</button>
             </div>
         </div>

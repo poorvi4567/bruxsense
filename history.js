@@ -147,47 +147,55 @@
 
     // Load up to 200 readings for charts
     let readings = [];
-    try {
-      const rq = query(
-        collection(fsdb, 'sessions', sessionId, 'readings'),
-        orderBy('timestamp_epoch', 'asc'),
-        limit(200)
-      );
-      const rsnap = await getDocs(rq);
-      rsnap.forEach(d => readings.push(d.data()));
-    } catch (e) {
-      // Fallback without orderBy
+    if (summary.readingsData && Array.isArray(summary.readingsData)) {
+      readings = summary.readingsData;
+    } else {
       try {
-        const rq2 = query(
+        const rq = query(
           collection(fsdb, 'sessions', sessionId, 'readings'),
+          orderBy('timestamp_epoch', 'asc'),
           limit(200)
         );
-        const rsnap2 = await getDocs(rq2);
-        rsnap2.forEach(d => readings.push(d.data()));
-        readings.sort((a, b) => (a.timestamp_epoch || 0) - (b.timestamp_epoch || 0));
-      } catch (e2) { console.warn('Could not load readings:', e2.message); }
+        const rsnap = await getDocs(rq);
+        rsnap.forEach(d => readings.push(d.data()));
+      } catch (e) {
+        // Fallback without orderBy
+        try {
+          const rq2 = query(
+            collection(fsdb, 'sessions', sessionId, 'readings'),
+            limit(200)
+          );
+          const rsnap2 = await getDocs(rq2);
+          rsnap2.forEach(d => readings.push(d.data()));
+          readings.sort((a, b) => (a.timestamp_epoch || 0) - (b.timestamp_epoch || 0));
+        } catch (e2) { console.warn('Could not load readings:', e2.message); }
+      }
     }
 
     // Load events
     let events = [];
-    try {
-      const eq = query(
-        collection(fsdb, 'sessions', sessionId, 'events'),
-        orderBy('timestamp_epoch', 'asc'),
-        limit(100)
-      );
-      const esnap = await getDocs(eq);
-      esnap.forEach(d => events.push(d.data()));
-    } catch (e) {
+    if (summary.eventsData && Array.isArray(summary.eventsData)) {
+      events = summary.eventsData;
+    } else {
       try {
-        const eq2 = query(
+        const eq = query(
           collection(fsdb, 'sessions', sessionId, 'events'),
+          orderBy('timestamp_epoch', 'asc'),
           limit(100)
         );
-        const esnap2 = await getDocs(eq2);
-        esnap2.forEach(d => events.push(d.data()));
-        events.sort((a, b) => (a.timestamp_epoch || 0) - (b.timestamp_epoch || 0));
-      } catch (e2) { console.warn('Could not load events:', e2.message); }
+        const esnap = await getDocs(eq);
+        esnap.forEach(d => events.push(d.data()));
+      } catch (e) {
+        try {
+          const eq2 = query(
+            collection(fsdb, 'sessions', sessionId, 'events'),
+            limit(100)
+          );
+          const esnap2 = await getDocs(eq2);
+          esnap2.forEach(d => events.push(d.data()));
+          events.sort((a, b) => (a.timestamp_epoch || 0) - (b.timestamp_epoch || 0));
+        } catch (e2) { console.warn('Could not load events:', e2.message); }
+      }
     }
 
     renderSessionDetail(sessionId, summary, readings, events);
@@ -203,8 +211,13 @@
 
     // Build chart data from readings
     const chartLabels = readings.map(r => {
+      let d = null;
       if (r.timestamp && typeof r.timestamp.toDate === 'function') {
-        const d = r.timestamp.toDate();
+        d = r.timestamp.toDate();
+      } else if (r.timestamp_epoch) {
+        d = new Date(r.timestamp_epoch * 1000);
+      }
+      if (d) {
         return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
       }
       return '';
@@ -223,6 +236,9 @@
           let ts = '—';
           if (ev.start_time && typeof ev.start_time.toDate === 'function') {
             const d = ev.start_time.toDate();
+            ts = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+          } else if (ev.timestamp_epoch) {
+            const d = new Date(ev.timestamp_epoch * 1000);
             ts = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
           }
           const dur  = ev.duration_ms   ? (ev.duration_ms / 1000).toFixed(1) + 's' : '—';

@@ -152,6 +152,10 @@
             window._reportGenerating = true;
             const { ref: r, set } = window._rtdbAPI;
             set(r(rtdb, `bruxsense/sessions/${USER_ID}/current_session/metadata/status`), 'saving')
+              .then(() => {
+                console.log("[Report] Waiting 3 seconds for ESP32 to finish pushing buffered data...");
+                return new Promise(resolve => setTimeout(resolve, 3000));
+              })
               .then(() => _collectDataAndGeneratePDF(data, false))
               .then(() => {
                 window._reportGenerating = false;
@@ -175,7 +179,7 @@
       btnPdf.style.display = 'inline-flex';
       btnPdf.onclick = () => _collectDataAndGeneratePDF(metaData);
     }
-    
+
     let btnCsv = document.getElementById('exportCSVBtn');
     if (btnCsv) {
       btnCsv.style.display = 'inline-flex';
@@ -195,7 +199,7 @@
     function update() {
       const nowEpoch = Math.floor(Date.now() / 1000);
       const timeLeft = endEpoch - nowEpoch;
-      
+
       console.log(`[Countdown Tick] timeLeft: ${timeLeft}, nowEpoch: ${nowEpoch}, endEpoch: ${endEpoch}`);
 
       if (timeLeft <= 0) {
@@ -298,21 +302,27 @@
 
   // ── Fetch data then generate ───────────────────────────
   async function _collectDataAndGeneratePDF(metaData, shouldDownload = true) {
+    console.log('[Report] Generating PDF Clinical Report...');
     const rtdb = window._rtdb;
-    const { ref, get } = window._rtdbAPI;
+    const { ref, onValue } = window._rtdbAPI;
     const USER_ID = window._USER_ID;
+
+    // Helper to guarantee fresh data from server (bypasses local cache issues)
+    const getFresh = (path) => new Promise(resolve => {
+      onValue(ref(rtdb, path), snap => resolve(snap), { onlyOnce: true });
+    });
 
     let readings = [], events = [];
     try {
-      const rs = await get(ref(rtdb, `bruxsense/sessions/${USER_ID}/readings`));
+      const rs = await getFresh(`bruxsense/sessions/${USER_ID}/readings`);
       if (rs.exists()) rs.forEach(s => readings.push(s.val()));
-      const es = await get(ref(rtdb, `bruxsense/sessions/${USER_ID}/events`));
+      const es = await getFresh(`bruxsense/sessions/${USER_ID}/events`);
       if (es.exists()) es.forEach(s => events.push(s.val()));
 
       console.log(`[Report] Fetched from RTDB: ${readings.length} readings, ${events.length} events`);
 
       // Fetch calibration node from RTDB so metadata has actual calibrated values
-      const cs = await get(ref(rtdb, `bruxsense/sessions/${USER_ID}/current_session/calibration`));
+      const cs = await getFresh(`bruxsense/sessions/${USER_ID}/current_session/calibration`);
       if (cs.exists()) {
         metaData.calibration = cs.val();
       }
@@ -428,6 +438,21 @@
 
         const calib = metaData.calibration || {};
         const sessionRef = doc(collection(fsdb, 'sessions'));
+        
+        const readingsArray = readings.map(r => ({
+          timestamp_epoch: r.timestamp_epoch || 0,
+          emg_val: r.emg_rms || 0, emg_peak: r.emg_peak || 0, hr_bpm: r.hr_bpm || 0,
+          grinding_score: r.grinding_score !== undefined ? r.grinding_score : (
+            r.grind_score !== undefined ? r.grind_score : Math.round(Math.sqrt((r.mag_x || 0) ** 2 + (r.mag_y || 0) ** 2 + (r.mag_z || 0) ** 2))
+          ),
+          mag_x: r.mag_x || 0, mag_y: r.mag_y || 0, mag_z: r.mag_z || 0, event_duration_ms: r.event_duration_ms || 0
+        }));
+
+        const eventsArray = events.map(e => ({
+          timestamp_epoch: e.timestamp_epoch || 0, duration_ms: e.duration_ms || 0,
+          peak_rms: e.peak_rms || 0, hr_at_event: e.hr_at_event || 0, type: e.type || 'clench'
+        }));
+
         await setDoc(sessionRef, {
           userId: USER_ID, patient_id: patientId, patient_name: patientName,
           device_id: deviceId, date: new Date().toLocaleDateString('en-GB'),
@@ -438,56 +463,12 @@
             emg_threshold: calib.emg_threshold ?? 0, mag_noise_floor: calib.mag_noise_floor ?? 0,
             mag_active_grind: calib.mag_active_grind ?? 0
           },
-          statistics: { max_emg_v: maxEmg, avg_hr_bpm: avgHr, phasic_events: phasicCount, tonic_events: tonicCount, grinding_episodes: grindingCount }
+          statistics: { max_emg_v: maxEmg, avg_hr_bpm: avgHr, phasic_events: phasicCount, tonic_events: tonicCount, grinding_episodes: grindingCount },
+          readingsData: readingsArray,
+          eventsData: eventsArray
         });
-        // Write readings in parallel batches (resilient to individual failures)
-        console.log(`[Report] Saving ${readings.length} readings to Firestore...`);
-        const BATCH_SIZE = 10;
-        let readingsSaved = 0, readingsFailed = 0;
-        for (let i = 0; i < readings.length; i += BATCH_SIZE) {
-          const batch = readings.slice(i, i + BATCH_SIZE);
-          const promises = batch.map(r => {
-            const rRef = doc(collection(fsdb, 'sessions', sessionRef.id, 'readings'));
-            const rDate = r.timestamp_epoch ? new Date(r.timestamp_epoch * 1000) : new Date();
-            return setDoc(rRef, {
-              timestamp: rDate, timestamp_epoch: r.timestamp_epoch || 0,
-              emg_val: r.emg_rms || 0, emg_peak: r.emg_peak || 0, hr_bpm: r.hr_bpm || 0,
-              grinding_score: r.grinding_score !== undefined ? r.grinding_score : (
-                r.grind_score !== undefined ? r.grind_score : Math.round(Math.sqrt((r.mag_x||0)**2 + (r.mag_y||0)**2 + (r.mag_z||0)**2))
-              ),
-              mag_x: r.mag_x || 0, mag_y: r.mag_y || 0, mag_z: r.mag_z || 0, event_duration_ms: r.event_duration_ms || 0
-            });
-          });
-          const results = await Promise.allSettled(promises);
-          results.forEach((res, idx) => {
-            if (res.status === 'fulfilled') { readingsSaved++; }
-            else { readingsFailed++; console.error(`[Report] Reading ${i + idx} write failed:`, res.reason); }
-          });
-        }
-        console.log(`[Report] Readings: ${readingsSaved} saved, ${readingsFailed} failed out of ${readings.length}`);
 
-        // Write events in parallel batches
-        console.log(`[Report] Saving ${events.length} events to Firestore...`);
-        let eventsSaved = 0, eventsFailed = 0;
-        for (let i = 0; i < events.length; i += BATCH_SIZE) {
-          const batch = events.slice(i, i + BATCH_SIZE);
-          const promises = batch.map(e => {
-            const eRef = doc(collection(fsdb, 'sessions', sessionRef.id, 'events'));
-            const eDate = e.timestamp_epoch ? new Date(e.timestamp_epoch * 1000) : new Date();
-            return setDoc(eRef, {
-              start_time: eDate, end_time: new Date(eDate.getTime() + (e.duration_ms || 0)),
-              timestamp_epoch: e.timestamp_epoch || 0, duration_ms: e.duration_ms || 0,
-              peak_rms: e.peak_rms || 0, hr_at_event: e.hr_at_event || 0, type: e.type || 'clench'
-            });
-          });
-          const results = await Promise.allSettled(promises);
-          results.forEach((res, idx) => {
-            if (res.status === 'fulfilled') { eventsSaved++; }
-            else { eventsFailed++; console.error(`[Report] Event ${i + idx} write failed:`, res.reason); }
-          });
-        }
-        console.log(`[Report] Events: ${eventsSaved} saved, ${eventsFailed} failed out of ${events.length}`);
-        console.log('[Report] Firestore write complete');
+        console.log(`[Report] Atomically saved session with ${readingsArray.length} readings and ${eventsArray.length} events to Firestore.`);
       }
     } catch (fsErr) {
       console.warn('[Report] Firestore write failed:', fsErr);
@@ -672,7 +653,7 @@
         else if (metaData.created_at.seconds) completionTime = new Date(metaData.created_at.seconds * 1000);
         else completionTime = new Date(metaData.created_at);
       }
-      
+
       if (completionTime) {
         const durationSec = (metaData.duration_hours || 0) * 3600;
         const startTime = new Date(completionTime.getTime() - durationSec * 1000);
@@ -743,9 +724,18 @@
       if (val >= 100) return 'Moderate';
       return 'Mild';
     }
-    const severeCount = emgVals.filter(v => v >= 200).length;
-    const moderateCount = emgVals.filter(v => v >= 100 && v < 200).length;
-    const mildCount = emgVals.filter(v => v < 100).length;
+    const severeCount = events.filter(e => {
+      const val = e.peak_rms ?? e.emg_peak ?? 0;
+      return val >= 200;
+    }).length;
+    const moderateCount = events.filter(e => {
+      const val = e.peak_rms ?? e.emg_peak ?? 0;
+      return val >= 100 && val < 200;
+    }).length;
+    const mildCount = events.filter(e => {
+      const val = e.peak_rms ?? e.emg_peak ?? 0;
+      return val < 100;
+    }).length;
 
     // Simulated HR correlated with EMG (used if PPG data absent)
     function simulatedHR(emgArr) {
@@ -1435,11 +1425,11 @@
   window.generateDetailedClinicalPDF = generateClinicalPDF;
 
   // Expose live CSV export to window for manual header CSV downloads
-  window.exportCurrentSessionCSV = async function() {
+  window.exportCurrentSessionCSV = async function () {
     const rtdb = window._rtdb;
     const { ref, get } = window._rtdbAPI;
     const USER_ID = window._USER_ID;
-    
+
     let readings = [];
     try {
       const rs = await get(ref(rtdb, `bruxsense/sessions/${USER_ID}/readings`));
@@ -1449,7 +1439,7 @@
       alert('Error fetching session readings: ' + err.message);
       return;
     }
-    
+
     // Generate mock readings for CSV if empty (offline test mode support)
     if (readings.length === 0) {
       console.log('[Test Mode] Generating mock readings for CSV export...');
@@ -1467,13 +1457,13 @@
         });
       }
     }
-    
+
     const headers = 'timestamp,emg_val,emg_peak,heart_rate,grinding_score,event_duration_ms\n';
     const rows = readings.map(r => {
       const tsIso = r.timestamp_epoch ? new Date(r.timestamp_epoch * 1000).toISOString() : '';
       const hr = r.hr_bpm || 0;
       const grind = r.grinding_score !== undefined ? r.grinding_score : (
-        r.grind_score !== undefined ? r.grind_score : Math.round(Math.sqrt((r.mag_x||0)**2 + (r.mag_y||0)**2 + (r.mag_z||0)**2))
+        r.grind_score !== undefined ? r.grind_score : Math.round(Math.sqrt((r.mag_x || 0) ** 2 + (r.mag_y || 0) ** 2 + (r.mag_z || 0) ** 2))
       );
       return [
         tsIso, r.emg_rms || 0, r.emg_peak || 0, hr, grind, r.event_duration_ms || 0
@@ -1481,9 +1471,9 @@
     }).join('\n');
 
     const blob = new Blob([headers + rows], { type: 'text/csv' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
     a.download = `bruxsense_session_${Math.floor(Date.now() / 1000)}.csv`;
     a.click();
     URL.revokeObjectURL(url);

@@ -317,7 +317,7 @@
       console.log(`[Data Trace] 1. Initiating getFresh for readings path: bruxsense/sessions/${USER_ID}/readings`);
       const rs = await getFresh(`bruxsense/sessions/${USER_ID}/readings`);
       console.log(`[Data Trace] 2. getFresh resolved for readings. rs.exists():`, rs.exists());
-      
+
       if (rs.exists()) {
         const rawReadings = rs.val();
         console.log(`[Data Trace] 3. Raw readings object from RTDB:`, JSON.stringify(rawReadings));
@@ -330,7 +330,7 @@
       console.log(`[Data Trace] 5. Initiating getFresh for events path: bruxsense/sessions/${USER_ID}/events`);
       const es = await getFresh(`bruxsense/sessions/${USER_ID}/events`);
       console.log(`[Data Trace] 6. getFresh resolved for events. es.exists():`, es.exists());
-      
+
       if (es.exists()) {
         const rawEvents = es.val();
         console.log(`[Data Trace] 7. Raw events object from RTDB:`, JSON.stringify(rawEvents));
@@ -459,7 +459,7 @@
 
         const calib = metaData.calibration || {};
         const sessionRef = doc(collection(fsdb, 'sessions'));
-        
+
         const readingsArray = readings.map(r => ({
           timestamp_epoch: r.timestamp_epoch || 0,
           emg_val: r.emg_rms || 0, emg_peak: r.emg_peak || 0, hr_bpm: r.hr_bpm || 0,
@@ -784,6 +784,17 @@
       return `T+${(i * 7)}s`;
     });
 
+    const readingsTimestamps = readings.map((r, i) => {
+      if (r.timestamp_epoch) {
+        return new Date(r.timestamp_epoch * 1000).toLocaleTimeString('en-GB');
+      }
+      if (r.timestamp_iso) return r.timestamp_iso.split('T')[1].split('+')[0];
+      return `T+${(i * 7)}s`;
+    });
+
+    const eventRmsVals = events.map(e => e.peak_rms ?? e.emg_peak ?? e.mean_rms ?? e.emg_rms ?? 0);
+    const eventHrVals = events.map(e => e.hr_at_event || 0);
+
     // ── Mini chart renderer (inline SVG-style bars via jsPDF lines) ──────
     function drawBarChart(x, y, w, h, values, timestamps, title, yLabel, colorFn) {
       // border
@@ -835,12 +846,13 @@
         doc.rect(bx, by, barW, bh, 'F');
       });
 
-      // x labels (every 3rd)
+      // x labels
+      const skip = values.length > 20 ? Math.ceil(values.length / 20) : 1;
       values.forEach((_, i) => {
-        if (i % 3 !== 0) return;
+        if (i % skip !== 0) return;
         const lx = chartX + i * gap + barW / 2;
         setFont(false, 5, MUTED);
-        const label = timestamps[i] ? timestamps[i].substring(3, 8) : String(i);
+        const label = timestamps[i] ? timestamps[i].substring(0, 8) : String(i);
         doc.text(label, lx, chartY + chartH + 5, { align: 'center', angle: 0 });
       });
 
@@ -929,10 +941,11 @@
       });
 
       // x labels
+      const skip = values.length > 20 ? Math.ceil(values.length / 20) : 1;
       values.forEach((_, i) => {
-        if (i % 3 !== 0) return;
+        if (i % skip !== 0) return;
         setFont(false, 5, MUTED);
-        const label = timestamps[i] ? timestamps[i].substring(3, 8) : String(i);
+        const label = timestamps[i] ? timestamps[i].substring(0, 8) : String(i);
         doc.text(label, pts[i][0], chartY + chartH + 5, { align: 'center' });
       });
 
@@ -1002,10 +1015,11 @@
       doc.text(`Peak\n${lineVals[peakIdx].toFixed(1)} BPM`, ppx + 1.5, ppy - 2);
 
       // x labels
+      const skip = lineVals.length > 20 ? Math.ceil(lineVals.length / 20) : 1;
       lineVals.forEach((_, i) => {
-        if (i % 3 !== 0) return;
+        if (i % skip !== 0) return;
         setFont(false, 5, MUTED);
-        const label = timestamps[i] ? timestamps[i].substring(3, 8) : String(i);
+        const label = timestamps[i] ? timestamps[i].substring(0, 8) : String(i);
         doc.text(label, pts[i][0], chartY + chartH + 5, { align: 'center' });
       });
 
@@ -1045,7 +1059,7 @@
       [0, Math.floor(emgArr.length / 4), Math.floor(emgArr.length / 2),
         Math.floor(3 * emgArr.length / 4), emgArr.length - 1].forEach(i => {
           setFont(false, 5, MUTED);
-          const label = timestamps[i] ? timestamps[i].substring(3, 8) : '';
+          const label = timestamps[i] ? timestamps[i].substring(0, 8) : '';
           doc.text(label, x + i * bw, y + h - 1, { align: 'center' });
         });
     }
@@ -1120,26 +1134,26 @@
 
     // EMG bar chart
     y = subHeader('EMG RMS Distribution — All Detected Events', y);
-    drawBarChart(ML, y, CW, 40, emgVals, eventTimestamps,
+    drawBarChart(ML, y, CW, 40, eventRmsVals, eventTimestamps,
       'EMG RMS per Bruxism Event', 'EMG RMS (µV)',
       v => v >= 200 ? RED : v >= 100 ? ORANGE : YELLOW);
     y += 42;
 
     // Peak EMG line chart
     y = subHeader('Peak EMG Trajectory', y);
-    drawLineChart(ML, y, CW, 35, emgPeaks, eventTimestamps,
+    drawLineChart(ML, y, CW, 35, eventRmsVals, eventTimestamps,
       'Peak EMG Amplitude Over Session', 'Peak EMG (µV)', BLUE, BLUE);
     y += 37;
 
     // Timeline
     y = subHeader('Session Event Timeline', y);
-    drawTimeline(ML, y, CW, 16, emgVals, eventTimestamps,
+    drawTimeline(ML, y, CW, 16, eventRmsVals, eventTimestamps,
       'Event Timeline (colour = severity)');
     y += 18;
 
     // HR chart
     y = subHeader('Heart Rate Correlation with Bruxism Events', y);
-    drawDualAxisChart(ML, y, CW, 40, emgVals, hrForChart, eventTimestamps,
+    drawDualAxisChart(ML, y, CW, 40, eventRmsVals, eventHrVals, eventTimestamps,
       'Heart Rate vs Bruxism Events');
     y += 42;
 
